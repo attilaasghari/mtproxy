@@ -1,4 +1,4 @@
-name: MTProto Proxy with Fake TLS
+name: MTProto Fake TLS Proxy
 
 on:
   workflow_dispatch:
@@ -7,58 +7,73 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Cleanup previous runs
+      - name: Clean up previous containers
         run: |
           docker stop $(docker ps -aq) 2>/dev/null || true
           docker rm $(docker ps -aq) 2>/dev/null || true
 
-      - name: Get Public IP
-        id: ip
+      - name: Run MTProto Proxy with Fake TLS
         run: |
-          SERVER_IP=$(curl -s ifconfig.me)
-          echo "IP=${SERVER_IP}" >> $GITHUB_OUTPUT
-          echo "Server IP: ${SERVER_IP}"
-
-      - name: Run MTProto Proxy (Fake TLS Mode)
-        run: |
-          # 1. Generate a random 32-character hex secret for Fake TLS (must start with 'ee')
-          SECRET_RAW=$(head -c 16 /dev/urandom | xxd -ps)
-          SECRET="ee${SECRET_RAW}"  # 'ee' prefix enables Fake TLS obfuscation
+          # Generate random 32-character hex key
+          RANDOM_KEY=$(head -c 16 /dev/urandom | xxd -ps)
           
-          # 2. Run the official Telegram proxy with the secret
+          # Define the mask domain (trusted Russian domain that works well)
+          MASK_DOMAIN="1c.ru"
+          
+          # Convert domain to hexadecimal
+          DOMAIN_HEX=$(echo -n "$MASK_DOMAIN" | xxd -ps -c 200)
+          
+          # Create FULL Fake TLS secret: 'ee' + key + domain_hex
+          FULL_SECRET="ee${RANDOM_KEY}${DOMAIN_HEX}"
+          
+          # Get the public IP of this GitHub runner
+          SERVER_IP=$(curl -s ifconfig.me)
+          
+          # Run the proxy container
           docker run -d \
             --name=mtproxy \
             --restart=unless-stopped \
             -p 8443:443 \
-            -e SECRET=${SECRET} \
+            -e SECRET=${RANDOM_KEY} \
             telegrammessenger/proxy:latest
           
-          # 3. Wait for the proxy to initialize
+          # Wait for proxy to initialize
           sleep 8
-
-          # 4. Generate the connection link
-          SERVER_IP="${{ steps.ip.outputs.IP }}"
           
+          # Output the connection information
           echo "=========================================="
-          echo "✅ PROXY IS READY (Fake TLS Mode)"
+          echo "✅ FAKE TLS PROXY IS READY"
           echo "=========================================="
-          echo "🔗 Link for Telegram:"
-          echo "tg://proxy?server=${SERVER_IP}&port=8443&secret=${SECRET}"
           echo ""
-          echo "📋 Manual Entry:"
+          echo "🔗 ONE-CLICK LINK (copy this into Telegram):"
+          echo "tg://proxy?server=${SERVER_IP}&port=8443&secret=${FULL_SECRET}"
+          echo ""
+          echo "📋 MANUAL ENTRY (if the link doesn't work):"
           echo "Server: ${SERVER_IP}"
           echo "Port: 8443"
-          echo "Secret: ${SECRET}"
+          echo "Secret: ${FULL_SECRET}"
+          echo ""
+          echo "⚠️  Secret starts with 'ee' - this enables Fake TLS mode"
           echo "=========================================="
 
-      - name: Keep Workflow Alive
+      - name: Keep workflow alive for 6 hours
         run: |
-          echo "Proxy is running. This workflow will stay alive for up to 6 hours."
-          echo "You can cancel it manually from the Actions tab when done."
-          while true; do
+          echo "Proxy is running on port 8443 with Fake TLS enabled"
+          echo "This workflow will stay alive for up to 6 hours"
+          echo "You can cancel it manually from the Actions tab when done"
+          echo ""
+          COUNTER=0
+          while [ $COUNTER -lt 360 ]; do
             if ! docker ps | grep -q mtproxy; then
               echo "❌ Proxy container stopped unexpectedly!"
+              docker logs mtproxy --tail 20
               exit 1
             fi
+            # Show status every 10 minutes
+            if [ $((COUNTER % 10)) -eq 0 ]; then
+              echo "[$(date '+%H:%M:%S')] Proxy still running... ($((360 - COUNTER)) minutes remaining)"
+            fi
             sleep 60
+            COUNTER=$((COUNTER + 1))
           done
+          echo "6 hours completed. Workflow ending."
