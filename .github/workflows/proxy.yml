@@ -1,0 +1,58 @@
+name: MTProxy
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Create config
+      run: |
+        mkdir -p mtproto
+        cd mtproto
+        cat > config.json << 'EOF'
+        {
+            "container": "telegrammessenger/proxy:latest",
+            "volume": "proxy-config",
+            "port": 443,
+            "secret": ""
+        }
+        EOF
+        
+    - name: Run MTProxy
+      run: |
+        docker run -d \
+          --name=mtproto-proxy \
+          --restart=unless-stopped \
+          -p 443:443 \
+          telegrammessenger/proxy:latest
+        sleep 3
+        
+    - name: Generate secret and link
+      run: |
+        SECRET=$(docker exec mtproto-proxy head -c 16 /dev/urandom | xxd -ps)
+        docker exec mtproto-proxy bash -c "echo $SECRET > /data/secret"
+        
+        SERVER_IP=$(curl -s ifconfig.me)
+        
+        echo "=========================================="
+        echo "✅ PROXY IS READY"
+        echo "=========================================="
+        echo ""
+        echo "LINK FOR TELEGRAM:"
+        echo "tg://proxy?server=$SERVER_IP&port=443&secret=$SECRET"
+        echo ""
+        echo "=========================================="
+        echo "SECRET (for manual entry): $SECRET"
+        echo "SERVER IP: $SERVER_IP"
+        echo "PORT: 443"
+        echo "=========================================="
+        
+    - name: Keep alive
+      run: |
+        echo "Proxy is running. This workflow will stop after 6 hours."
+        while true; do
+          docker ps | grep mtproto-proxy || exit 1
+          sleep 60
+        done
