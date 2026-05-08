@@ -9,71 +9,88 @@ jobs:
     steps:
       - name: Clean up previous containers
         run: |
-          docker stop $(docker ps -aq) 2>/dev/null || true
-          docker rm $(docker ps -aq) 2>/dev/null || true
-
-      - name: Run MTProto Proxy with Fake TLS
+          echo "Cleaning up old containers..."
+          docker stop $(docker ps -aq) 2>/dev/null || echo "No containers to stop"
+          docker rm $(docker ps -aq) 2>/dev/null || echo "No containers to remove"
+          
+      - name: Generate Fake TLS Secret
+        id: secrets
         run: |
-          # Generate random 32-character hex key
+          echo "Generating random key..."
           RANDOM_KEY=$(head -c 16 /dev/urandom | xxd -ps)
+          echo "Random key: $RANDOM_KEY"
           
-          # Define the mask domain (trusted Russian domain that works well)
           MASK_DOMAIN="1c.ru"
+          echo "Mask domain: $MASK_DOMAIN"
           
-          # Convert domain to hexadecimal
           DOMAIN_HEX=$(echo -n "$MASK_DOMAIN" | xxd -ps -c 200)
+          echo "Domain hex: $DOMAIN_HEX"
           
-          # Create FULL Fake TLS secret: 'ee' + key + domain_hex
           FULL_SECRET="ee${RANDOM_KEY}${DOMAIN_HEX}"
+          echo "Full secret length: ${#FULL_SECRET} characters"
           
-          # Get the public IP of this GitHub runner
+          echo "random_key=$RANDOM_KEY" >> $GITHUB_OUTPUT
+          echo "full_secret=$FULL_SECRET" >> $GITHUB_OUTPUT
+          
+      - name: Get Public IP
+        id: ip
+        run: |
           SERVER_IP=$(curl -s ifconfig.me)
+          echo "Server IP: $SERVER_IP"
+          echo "ip=$SERVER_IP" >> $GITHUB_OUTPUT
           
-          # Run the proxy container
+      - name: Run Proxy Container
+        id: run_proxy
+        run: |
+          echo "Starting proxy container..."
           docker run -d \
             --name=mtproxy \
             --restart=unless-stopped \
             -p 8443:443 \
-            -e SECRET=${RANDOM_KEY} \
+            -e SECRET=${{ steps.secrets.outputs.random_key }} \
             telegrammessenger/proxy:latest
           
-          # Wait for proxy to initialize
-          sleep 8
+          # Check if container started
+          if docker ps | grep -q mtproxy; then
+            echo "✅ Container started successfully"
+          else
+            echo "❌ Container failed to start"
+            docker logs mtproxy 2>&1 || echo "No logs available"
+            exit 1
+          fi
           
-          # Output the connection information
+          # Wait for proxy to initialize
+          echo "Waiting 10 seconds for proxy to initialize..."
+          sleep 10
+          
+      - name: Display Proxy Info
+        run: |
           echo "=========================================="
           echo "✅ FAKE TLS PROXY IS READY"
           echo "=========================================="
           echo ""
           echo "🔗 ONE-CLICK LINK (copy this into Telegram):"
-          echo "tg://proxy?server=${SERVER_IP}&port=8443&secret=${FULL_SECRET}"
+          echo "tg://proxy?server=${{ steps.ip.outputs.ip }}&port=8443&secret=${{ steps.secrets.outputs.full_secret }}"
           echo ""
-          echo "📋 MANUAL ENTRY (if the link doesn't work):"
-          echo "Server: ${SERVER_IP}"
+          echo "📋 MANUAL ENTRY:"
+          echo "Server: ${{ steps.ip.outputs.ip }}"
           echo "Port: 8443"
-          echo "Secret: ${FULL_SECRET}"
+          echo "Secret: ${{ steps.secrets.outputs.full_secret }}"
           echo ""
-          echo "⚠️  Secret starts with 'ee' - this enables Fake TLS mode"
           echo "=========================================="
-
-      - name: Keep workflow alive for 6 hours
-        run: |
-          echo "Proxy is running on port 8443 with Fake TLS enabled"
-          echo "This workflow will stay alive for up to 6 hours"
-          echo "You can cancel it manually from the Actions tab when done"
           echo ""
-          COUNTER=0
-          while [ $COUNTER -lt 360 ]; do
+          echo "Container status:"
+          docker ps | grep mtproxy
+          
+      - name: Keep workflow alive
+        run: |
+          echo "Proxy is running. This will stay alive for up to 6 hours."
+          echo "You can cancel manually from Actions tab when done."
+          while true; do
             if ! docker ps | grep -q mtproxy; then
-              echo "❌ Proxy container stopped unexpectedly!"
+              echo "❌ Proxy stopped! Last logs:"
               docker logs mtproxy --tail 20
               exit 1
             fi
-            # Show status every 10 minutes
-            if [ $((COUNTER % 10)) -eq 0 ]; then
-              echo "[$(date '+%H:%M:%S')] Proxy still running... ($((360 - COUNTER)) minutes remaining)"
-            fi
             sleep 60
-            COUNTER=$((COUNTER + 1))
           done
-          echo "6 hours completed. Workflow ending."
