@@ -1,4 +1,4 @@
-name: MTProxy
+name: Deploy telEgo Proxy
 
 on:
   workflow_dispatch:
@@ -7,86 +7,63 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - name: Clean up any existing containers
-      run: |
-        docker stop $(docker ps -aq) 2>/dev/null || true
-        docker rm $(docker ps -aq) 2>/dev/null || true
-        
-    - name: Run MTProxy on port 8080 (alternative port)
-      run: |
-        docker run -d \
-          --name=mtproto-proxy \
-          --restart=unless-stopped \
-          -p 8080:443 \
-          -e SECRET=$(head -c 16 /dev/urandom | xxd -ps) \
-          telegrammessenger/proxy:latest
-        sleep 5
-        
-    - name: Check if container is running
-      run: |
-        if docker ps | grep -q mtproto-proxy; then
-          echo "✅ Container is running"
-        else
-          echo "❌ Container failed to start"
-          docker logs mtproto-proxy
-          exit 1
-        fi
-        
-    - name: Get proxy link
-      run: |
-        SECRET=$(docker exec mtproto-proxy cat /data/secret 2>/dev/null || echo "")
-        
-        if [ -z "$SECRET" ]; then
-          SECRET=$(docker logs mtproto-proxy 2>&1 | grep -oE '[a-f0-9]{32}' | head -1)
-        fi
-        
-        SERVER_IP=$(curl -s ifconfig.me)
-        
-        echo "=========================================="
-        echo "✅ PROXY IS READY - USE PORT 8080"
-        echo "=========================================="
-        echo ""
-        echo "LINK FOR TELEGRAM:"
-        echo "tg://proxy?server=$SERVER_IP&port=8080&secret=$SECRET"
-        echo ""
-        echo "=========================================="
-        echo "MANUAL ENTRY:"
-        echo "Server: $SERVER_IP"
-        echo "Port: 8080"
-        echo "Secret: $SECRET"
-        echo "=========================================="
-        
-    - name: Keep proxy alive for 6 hours
-      run: |
-        echo "Proxy is running on port 8080"
-        echo "This workflow will auto-stop after 6 hours"
-        echo ""
-        echo "To stop earlier: Go to Actions tab → Cancel workflow"
-        echo ""
-        
-        COUNTER=0
-        while [ $COUNTER -lt 360 ]; do
-          if ! docker ps | grep -q mtproto-proxy; then
-            echo "❌ Proxy stopped unexpectedly!"
-            docker logs mtproto-proxy --tail 20
-            exit 1
-          fi
-          sleep 60
-          COUNTER=$((COUNTER + 1))
-          
-          # Show status every 10 minutes
-          if [ $((COUNTER % 10)) -eq 0 ]; then
-            echo "[$(date '+%H:%M:%S')] Proxy still running... ($((360 - COUNTER)) minutes remaining)"
-          fi
-        done
-        
-        echo "6 hours completed. Workflow ending."
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Show final logs
-      if: always()
-      run: |
-        echo "=== Final container status ==="
-        docker ps -a | grep mtproto-proxy || echo "Container not found"
-        echo ""
-        echo "=== Last 20 lines of logs ==="
-        docker logs mtproto-proxy --tail 20 2>/dev/null || echo "No logs available"
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Build telEgo
+        run: |
+          git clone https://github.com/Scratch-net/telego.git
+          cd telego
+          go build -o telego
+
+      - name: Generate Secret & Run Proxy
+        run: |
+          cd telego
+          # Generate the secret using Google as the mask
+          SECRET_OUTPUT=$(./telego generate www.google.com)
+          # Extract the 32-character hex secret
+          SECRET=$(echo "$SECRET_OUTPUT" | grep -oP 'secret=\K[a-f0-9]{32}')
+          
+          # Get the public IP of the runner
+          SERVER_IP=$(curl -s ifconfig.me)
+
+          # Create the configuration file for maximum stealth
+          cat > config.toml << EOF
+          [general]
+          bind-to = "0.0.0.0:443"
+
+          [secrets]
+          default = "$SECRET"
+
+          [tls-fronting]
+          mask-host = "www.google.com"
+          EOF
+
+          # Run the proxy in the background
+          ./telego run -c config.toml &
+
+          # Wait for it to initialize
+          sleep 5
+
+          # Print the connection link
+          echo "=========================================="
+          echo "✅ telEgo Proxy Active (TLS Fronting Mode)"
+          echo "=========================================="
+          echo "Your proxy link:"
+          echo "tg://proxy?server=$SERVER_IP&port=443&secret=ee$SECRET"
+          echo ""
+          echo "Manual Entry Details:"
+          echo "Server: $SERVER_IP"
+          echo "Port: 443"
+          echo "Secret: ee$SECRET"
+          echo "=========================================="
+
+      - name: Keep Runner Alive
+        run: |
+          echo "Proxy is running. This host will stay alive for up to 6 hours."
+          while true; do sleep 60; done
