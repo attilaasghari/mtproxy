@@ -1,4 +1,4 @@
-name: Deploy telEgo Proxy
+name: MTProto Proxy with Fake TLS
 
 on:
   workflow_dispatch:
@@ -7,63 +7,58 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.23'
-
-      - name: Build telEgo
+      - name: Cleanup previous runs
         run: |
-          git clone https://github.com/Scratch-net/telego.git
-          cd telego
-          go build -o telego
+          docker stop $(docker ps -aq) 2>/dev/null || true
+          docker rm $(docker ps -aq) 2>/dev/null || true
 
-      - name: Generate Secret & Run Proxy
+      - name: Get Public IP
+        id: ip
         run: |
-          cd telego
-          # Generate the secret using Google as the mask
-          SECRET_OUTPUT=$(./telego generate www.google.com)
-          # Extract the 32-character hex secret
-          SECRET=$(echo "$SECRET_OUTPUT" | grep -oP 'secret=\K[a-f0-9]{32}')
-          
-          # Get the public IP of the runner
           SERVER_IP=$(curl -s ifconfig.me)
+          echo "IP=${SERVER_IP}" >> $GITHUB_OUTPUT
+          echo "Server IP: ${SERVER_IP}"
 
-          # Create the configuration file for maximum stealth
-          cat > config.toml << EOF
-          [general]
-          bind-to = "0.0.0.0:443"
-
-          [secrets]
-          default = "$SECRET"
-
-          [tls-fronting]
-          mask-host = "www.google.com"
-          EOF
-
-          # Run the proxy in the background
-          ./telego run -c config.toml &
-
-          # Wait for it to initialize
-          sleep 5
-
-          # Print the connection link
-          echo "=========================================="
-          echo "✅ telEgo Proxy Active (TLS Fronting Mode)"
-          echo "=========================================="
-          echo "Your proxy link:"
-          echo "tg://proxy?server=$SERVER_IP&port=443&secret=ee$SECRET"
-          echo ""
-          echo "Manual Entry Details:"
-          echo "Server: $SERVER_IP"
-          echo "Port: 443"
-          echo "Secret: ee$SECRET"
-          echo "=========================================="
-
-      - name: Keep Runner Alive
+      - name: Run MTProto Proxy (Fake TLS Mode)
         run: |
-          echo "Proxy is running. This host will stay alive for up to 6 hours."
-          while true; do sleep 60; done
+          # 1. Generate a random 32-character hex secret for Fake TLS (must start with 'ee')
+          SECRET_RAW=$(head -c 16 /dev/urandom | xxd -ps)
+          SECRET="ee${SECRET_RAW}"  # 'ee' prefix enables Fake TLS obfuscation
+          
+          # 2. Run the official Telegram proxy with the secret
+          docker run -d \
+            --name=mtproxy \
+            --restart=unless-stopped \
+            -p 8443:443 \
+            -e SECRET=${SECRET} \
+            telegrammessenger/proxy:latest
+          
+          # 3. Wait for the proxy to initialize
+          sleep 8
+
+          # 4. Generate the connection link
+          SERVER_IP="${{ steps.ip.outputs.IP }}"
+          
+          echo "=========================================="
+          echo "✅ PROXY IS READY (Fake TLS Mode)"
+          echo "=========================================="
+          echo "🔗 Link for Telegram:"
+          echo "tg://proxy?server=${SERVER_IP}&port=8443&secret=${SECRET}"
+          echo ""
+          echo "📋 Manual Entry:"
+          echo "Server: ${SERVER_IP}"
+          echo "Port: 8443"
+          echo "Secret: ${SECRET}"
+          echo "=========================================="
+
+      - name: Keep Workflow Alive
+        run: |
+          echo "Proxy is running. This workflow will stay alive for up to 6 hours."
+          echo "You can cancel it manually from the Actions tab when done."
+          while true; do
+            if ! docker ps | grep -q mtproxy; then
+              echo "❌ Proxy container stopped unexpectedly!"
+              exit 1
+            fi
+            sleep 60
+          done
